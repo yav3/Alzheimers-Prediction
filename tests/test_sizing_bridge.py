@@ -75,3 +75,54 @@ def test_the_example_script_runs():
     import size_features
 
     assert size_features.main() == 0
+
+
+# ── Modules added when the reference package deepened ────────────────────────
+#
+# The sync vendors the whole package rather than a subset, so this repository
+# now carries the quantum-chemistry modules (Hamiltonians, resource estimation,
+# shot allocation) alongside the sizing it actually uses. They are not relevant
+# to an ADNI feature table and are not exercised beyond importing cleanly —
+# vendoring a partial package would be worse, because then "matches source"
+# would stop meaning anything.
+
+def test_the_whole_vendored_package_imports():
+    """A partial or broken sync shows up here rather than at first use."""
+    import sizing_bridge
+
+    for name in (
+        "audit_matrix",
+        "search_reduction",
+        "size_problem",
+        "select_active_space",
+        "estimate_resources",
+        "allocate_shots",
+        "Campaign",
+    ):
+        assert hasattr(sizing_bridge, name), f"{name} missing from vendored package"
+
+
+def test_campaign_memory_works_on_repeated_fits():
+    """The one new module that earns its place here.
+
+    A campaign keyed by the problem lets repeated fits on the same feature
+    table accumulate what earlier runs measured, instead of each fit starting
+    from the same bound.
+    """
+    from sizing_bridge import Campaign, MeasurementGroup, ProblemKey, allocate_shots
+
+    groups = [
+        MeasurementGroup("volumetric", coefficient=2.0, variance=1.0),
+        MeasurementGroup("cognitive", coefficient=1.0, variance=1.0),
+    ]
+    cold = allocate_shots(groups, budget=10_000)
+
+    campaign = Campaign(key=ProblemKey("adni-panel", n_electrons=4, n_orbitals=6))
+    campaign.seed(groups)
+    for _ in range(4):
+        campaign.observe({"volumetric": 0.05, "cognitive": 0.9})
+
+    warm = allocate_shots(campaign.groups(), budget=10_000)
+
+    assert warm.shots["volumetric"] < cold.shots["volumetric"]
+    assert campaign.summary()["n_runs"] == 4

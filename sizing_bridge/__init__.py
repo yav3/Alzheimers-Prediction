@@ -1,14 +1,24 @@
 # ── vendored ──
-# Vendored from lotwhitelabelnt backend/app/bridge/__init__.py at fd54432.
+# Vendored from lotwhitelabelnt backend/app/bridge/__init__.py at 4a3e245.
 # Do not edit here. Change the source, then re-run:
 #     python3 scripts/agent/sync_bridge.py <this directory>
 # Verify with --check. See app/bridge/__init__.py for the contract.
 # ── vendored ──
 
-"""Classical→quantum sizing bridge.
+"""Classical→quantum bridge: everything a hybrid job needs before it is submitted.
 
-Composes engines that already existed into the one pipeline a hybrid
-workload needs *before* a circuit exists:
+    hamiltonian   FCIDUMP in and out, active-space projection with the
+                  frozen-core fold, natural occupations from a 1-RDM
+    active_space  selection under a measured bound, with a refusal and
+                  chemical-validity enforcement
+    resources     qubits, Pauli terms counted not assumed, one-norm, shot
+                  budget for a target precision, device feasibility
+    allocation    Neyman allocation of a finite shot budget, against the
+                  uniform baseline it has to beat
+    campaign      run-to-run accumulation keyed by the problem, so a later
+                  job allocates against evidence rather than a bound
+
+Plus the domain-neutral pipeline the package started as:
 
     audit_matrix     domain-neutral pre-flight QC; nothing dropped silently
     search_reduction B2 projection lens driven by a classical search, with an
@@ -33,11 +43,41 @@ Known consolidation debt, deliberately not resolved in this change:
     is not importable from here today.
 """
 
+from .active_space import (
+    ActiveSpace,
+    SelectionReport,
+    determinant_count,
+    qubit_count,
+    select_active_space,
+)
+from .allocation import (
+    AllocationReport,
+    MeasurementGroup,
+    allocate_shots,
+    uniform_allocation,
+)
 from .audit import audit_matrix
+from .campaign import Campaign, CampaignStore, GroupBelief, ProblemKey
+from .hamiltonian import (
+    ElectronicHamiltonian,
+    natural_occupations,
+    parse_fcidump,
+    read_fcidump,
+    write_fcidump,
+)
 from .linalg import effective_rank, jl_min_k, jl_project
 from .manifest import build_manifest
 from .pipeline import forecast_cost, size_problem
 from .reduce import candidate_dims, search_reduction, worst_pairwise_distortion
+from .resources import (
+    DeviceModel,
+    FeasibilityReport,
+    ResourceEstimate,
+    check_feasibility,
+    estimate_resources,
+    one_norm,
+    shots_for_precision,
+)
 from .spec import (
     AuditReport,
     CostForecast,
@@ -47,7 +87,32 @@ from .spec import (
 )
 
 __all__ = [
+    "ActiveSpace",
+    "AllocationReport",
     "AuditReport",
+    "Campaign",
+    "CampaignStore",
+    "DeviceModel",
+    "ElectronicHamiltonian",
+    "FeasibilityReport",
+    "GroupBelief",
+    "MeasurementGroup",
+    "ProblemKey",
+    "ResourceEstimate",
+    "SelectionReport",
+    "allocate_shots",
+    "check_feasibility",
+    "determinant_count",
+    "estimate_resources",
+    "natural_occupations",
+    "one_norm",
+    "parse_fcidump",
+    "qubit_count",
+    "read_fcidump",
+    "select_active_space",
+    "shots_for_precision",
+    "uniform_allocation",
+    "write_fcidump",
     "CostForecast",
     "DroppedColumn",
     "ReductionReport",
