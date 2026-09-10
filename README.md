@@ -96,4 +96,22 @@ Unsurpisingly, cognitive test scores (`MMSE`) and age (`AGE`) are the most predi
 * Main problem with the model is False Negatives. As pointed out at the end of the script, when the model makes incorrect predictions, it often predicts Cognitively Normal (CN) when a patient has Limited Mild Conitive Impairment (LMCI) or Alzheimer's (AD). Roughly 50% of the errors were False Negatives.
 * This leads to a model with low sensitivity.
 
-**Proposed Solution:** Only predict CN if P(CN) > *some threshold* instead of predicting max(P(CN), P(LMCI), P(AD)). This should reduce the amount of CN predictions and thus, reduce the amount of False Negatives.  
+**Proposed Solution:** Only predict CN if P(CN) > *some threshold* instead of predicting max(P(CN), P(LMCI), P(AD)). This should reduce the amount of CN predictions and thus, reduce the amount of False Negatives.
+
+## Feature sizing before the fit
+
+`sizing_bridge/` audits a feature table and finds the smallest width that
+holds a measured distortion bound, or says plainly that the data does not
+support reduction. It runs before an expensive fit, reports every column it
+removes with the reason, and emits a manifest id that re-derives from
+identical inputs.
+
+```bash
+python3 examples/size_features.py   # worked example on a synthetic ADNI-shaped table
+python3 -m pytest tests/ -q         # smoke tests
+```
+
+The package is vendored from the `lotwhitelabelnt` repository
+(`backend/app/bridge/`) and re-synced by `scripts/agent/sync_bridge.py` there.
+Every file carries a provenance header naming its source commit — change the
+source, not the copy.
