@@ -17,7 +17,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sizing_bridge import search_reduction, size_problem  # noqa: E402
+from sizing_bridge import (  # noqa: E402
+    certify_reduction,
+    search_reduction,
+    size_problem,
+    solve_casci,
+)
+from sizing_bridge.hamiltonian import ElectronicHamiltonian  # noqa: E402
 
 BRIDGE_DIR = Path(__file__).resolve().parents[1] / "sizing_bridge"
 
@@ -126,3 +132,98 @@ def test_campaign_memory_works_on_repeated_fits():
 
     assert warm.shots["volumetric"] < cold.shots["volumetric"]
     assert campaign.summary()["n_runs"] == 4
+
+
+def _small_hamiltonian(n_orbitals: int, n_electrons: int, seed: int, core: float = 0.0):
+    """A random but physically shaped Hamiltonian: symmetric h, 8-fold ERI."""
+    rng = np.random.default_rng(seed)
+    one_body = rng.normal(size=(n_orbitals, n_orbitals))
+    one_body = 0.5 * (one_body + one_body.T)
+    factor = rng.normal(size=(n_orbitals, n_orbitals, 3))
+    factor = 0.5 * (factor + factor.transpose(1, 0, 2))
+    two_body = np.einsum("pqx,rsx->pqrs", factor, factor)
+    return ElectronicHamiltonian(
+        one_body=one_body,
+        two_body=two_body,
+        n_electrons=n_electrons,
+        core_energy=core,
+    )
+
+
+def test_the_solver_is_blind_to_a_change_of_orbital_basis():
+    """A rotation is bookkeeping, not physics, so the energy must not move.
+
+    This is the cheapest property that a mis-vendored solver fails: it
+    exercises the excitation signs, the integral transform and the Davidson
+    path at once, and it needs no reference data to check against.
+    """
+    hamiltonian = _small_hamiltonian(4, 4, seed=3, core=1.1)
+    rotation, _ = np.linalg.qr(np.random.default_rng(4).normal(size=(4, 4)))
+
+    plain = solve_casci(hamiltonian).energy
+    rotated = solve_casci(hamiltonian.transform(rotation)).energy
+    assert abs(plain - rotated) < 1e-9
+
+
+def test_the_core_energy_shifts_the_answer_and_nothing_else():
+    without = solve_casci(_small_hamiltonian(4, 4, seed=5, core=0.0)).energy
+    with_core = solve_casci(_small_hamiltonian(4, 4, seed=5, core=-2.5)).energy
+    assert abs(with_core - (without - 2.5)) < 1e-9
+
+
+def _hamiltonian_with_one_decoupled_orbital(seed: int):
+    """Four interacting orbitals plus a fifth that touches nothing.
+
+    A random Hamiltonian is the wrong fixture for a truncation test: random
+    integrals couple every orbital to every other, so no orbital is safe to
+    drop and a correct selector will decline to drop one. Here the fifth
+    orbital carries no integral connecting it to the rest and sits high in
+    energy, so removing it is exactly right and the error should be zero
+    rather than merely small.
+    """
+    interacting = _small_hamiltonian(4, 4, seed)
+    one_body = np.zeros((5, 5))
+    one_body[:4, :4] = interacting.one_body
+    one_body[4, 4] = 5.0
+    two_body = np.zeros((5,) * 4)
+    two_body[:4, :4, :4, :4] = interacting.two_body
+    two_body[4, 4, 4, 4] = 1.0
+    return ElectronicHamiltonian(
+        one_body=one_body, two_body=two_body, n_electrons=4
+    )
+
+
+def test_a_reduction_is_certified_against_the_untruncated_answer():
+    """The end-to-end path: rank, select, project, solve, compare."""
+    hamiltonian = _hamiltonian_with_one_decoupled_orbital(seed=6)
+    occupations = np.diag([1.98, 1.90, 0.10, 0.02, 0.0])
+
+    certificate = certify_reduction(hamiltonian, occupations)
+
+    assert certificate.certified, certificate.reason
+    assert certificate.space.n_orbitals < hamiltonian.n_orbitals
+    assert certificate.qubits_saved > 0
+    assert abs(certificate.error_hartree) < 1e-9
+    assert "kcal/mol" in certificate.summary()
+
+
+def test_a_space_that_drops_a_correlated_orbital_is_rejected_on_the_way():
+    """The rejected candidates are the evidence, so they are kept."""
+    hamiltonian = _hamiltonian_with_one_decoupled_orbital(seed=6)
+    occupations = np.diag([1.98, 1.90, 0.10, 0.02, 0.0])
+
+    certificate = certify_reduction(hamiltonian, occupations)
+
+    degraded = [c for c in certificate.candidates if c.status == "degraded"]
+    assert degraded, "a three-orbital space should not have survived"
+    assert all(abs(c.error_hartree) > 1e-3 for c in degraded)
+
+
+def test_a_reduction_that_cannot_be_checked_is_refused_not_assumed():
+    hamiltonian = _hamiltonian_with_one_decoupled_orbital(seed=7)
+    occupations = np.diag([1.98, 1.90, 0.10, 0.02, 0.0])
+
+    certificate = certify_reduction(hamiltonian, occupations, max_determinants=4)
+
+    assert certificate.verdict == "refused"
+    assert certificate.space is None

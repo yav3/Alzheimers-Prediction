@@ -1,5 +1,5 @@
 # ── vendored ──
-# Vendored from lotwhitelabelnt backend/app/bridge/__init__.py at 4a3e245.
+# Vendored from lotwhitelabelnt backend/app/bridge/__init__.py at 55e18a0.
 # Do not edit here. Change the source, then re-run:
 #     python3 scripts/agent/sync_bridge.py <this directory>
 # Verify with --check. See app/bridge/__init__.py for the contract.
@@ -11,6 +11,10 @@
                   frozen-core fold, natural occupations from a 1-RDM
     active_space  selection under a measured bound, with a refusal and
                   chemical-validity enforcement
+    casci         exact diagonalisation in the space, numpy only, so the
+                  selection can be checked rather than asserted
+    validate      the certificate: smallest space that reproduced a reference
+                  energy, with every rejected candidate kept
     resources     qubits, Pauli terms counted not assumed, one-norm, shot
                   budget for a target precision, device feasibility
     allocation    Neyman allocation of a finite shot budget, against the
@@ -58,6 +62,7 @@ from .allocation import (
 )
 from .audit import audit_matrix
 from .campaign import Campaign, CampaignStore, GroupBelief, ProblemKey
+from .casci import CASCIResult, DeterminantSpace, solve_casci
 from .hamiltonian import (
     ElectronicHamiltonian,
     natural_occupations,
@@ -85,10 +90,23 @@ from .spec import (
     ReductionReport,
     SizingReport,
 )
+from .validate import (
+    Candidate,
+    ReductionCertificate,
+    certify_reduction,
+    validate_space,
+)
 
 __all__ = [
     "ActiveSpace",
     "AllocationReport",
+    "CASCIResult",
+    "Candidate",
+    "DeterminantSpace",
+    "ReductionCertificate",
+    "certify_reduction",
+    "solve_casci",
+    "validate_space",
     "AuditReport",
     "Campaign",
     "CampaignStore",

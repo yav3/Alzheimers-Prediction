@@ -1,5 +1,5 @@
 # ── vendored ──
-# Vendored from lotwhitelabelnt backend/app/bridge/hamiltonian.py at 4a3e245.
+# Vendored from lotwhitelabelnt backend/app/bridge/hamiltonian.py at 55e18a0.
 # Do not edit here. Change the source, then re-run:
 #     python3 scripts/agent/sync_bridge.py <this directory>
 # Verify with --check. See app/bridge/__init__.py for the contract.
@@ -200,6 +200,65 @@ class ElectronicHamiltonian:
                 "frozen_orbitals": list(frozen),
             },
         )
+
+    def transform(self, coefficients: np.ndarray) -> ElectronicHamiltonian:
+        """Rotate into a new orthonormal orbital basis.
+
+        ``coefficients`` is the matrix U whose columns are the new orbitals
+        expressed in the current ones. The integrals transform as
+        h' = Uᵀ h U and (pq|rs)' = Σ U U U U (..), which is a quartic
+        contraction done here once rather than open-coded at each call site.
+
+        Orbital symmetries are dropped: a rotation mixes irreps unless it is
+        block-diagonal, and claiming a symmetry label that no longer holds is
+        worse than carrying none.
+        """
+        u = np.asarray(coefficients, dtype=float)
+        n = self.n_orbitals
+        if u.shape != (n, n):
+            raise ValueError(f"coefficients must be ({n}, {n}), got {u.shape}")
+        if not np.allclose(u.T @ u, np.eye(n), atol=1e-8):
+            raise ValueError("coefficients must be orthonormal")
+
+        h = u.T @ self.one_body @ u
+        g = np.einsum("pqrs,pa,qb,rc,sd->abcd", self.two_body, u, u, u, u, optimize=True)
+        return ElectronicHamiltonian(
+            one_body=h,
+            two_body=g,
+            n_electrons=self.n_electrons,
+            core_energy=self.core_energy,
+            ms2=self.ms2,
+            orbital_symmetries=(),
+            provenance={**self.provenance, "basis_rotated": True},
+        )
+
+    def to_natural_orbitals(
+        self, one_rdm: np.ndarray
+    ) -> tuple[ElectronicHamiltonian, np.ndarray]:
+        """Rotate into the natural orbitals of ``one_rdm``, occupations first.
+
+        This is the step that makes a selection applicable to an actual
+        Hamiltonian. `select_active_space` ranks orbitals by how far their
+        occupation sits from an integer, and that ranking is only meaningful in
+        the basis that diagonalises the density matrix. Returning the rotated
+        Hamiltonian alongside the occupations keeps the two in the same orbital
+        order, which is the pairing every downstream projection assumes.
+
+        The density matrix is the spatial 1-RDM from whatever correlated method
+        the caller can afford — MP2 and CCSD are the usual choices. It does not
+        need to be accurate; it needs to rank orbitals.
+        """
+        rdm = np.asarray(one_rdm, dtype=float)
+        n = self.n_orbitals
+        if rdm.shape != (n, n):
+            raise ValueError(f"one_rdm must be ({n}, {n}), got {rdm.shape}")
+        if not np.allclose(rdm, rdm.T, atol=1e-8):
+            raise ValueError("one_rdm must be symmetric")
+
+        values, vectors = np.linalg.eigh(rdm)
+        order = np.argsort(values)[::-1]
+        occupations = np.clip(values[order], 0.0, 2.0)
+        return self.transform(vectors[:, order]), occupations
 
     def as_dict(self) -> dict[str, Any]:
         return {
