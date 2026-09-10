@@ -1,5 +1,5 @@
 # ── vendored ──
-# Vendored from lotwhitelabelnt backend/app/bridge/active_space.py at 55e18a0.
+# Vendored from lotwhitelabelnt backend/app/bridge/active_space.py at 0f51295.
 # Do not edit here. Change the source, then re-run:
 #     python3 scripts/agent/sync_bridge.py <this directory>
 # Verify with --check. See app/bridge/__init__.py for the contract.
@@ -53,6 +53,7 @@ from typing import Any, Literal
 import numpy as np
 
 __all__ = [
+    "ranked_spaces",
     "ActiveSpace",
     "SelectionReport",
     "correlation_mass",
@@ -231,6 +232,40 @@ def _validity_error(n_electrons: int, n_orbitals: int) -> str | None:
 
 
 # ── Selection ────────────────────────────────────────────────────────────────
+
+def ranked_spaces(
+    occupations: np.ndarray,
+    *,
+    max_orbitals: int | None = None,
+    min_orbitals: int = 2,
+) -> list[ActiveSpace]:
+    """Every nested space the ranking implies, one per size, smallest first.
+
+    `select_active_space` answers "which space clears this tolerance"; this
+    answers "what is the whole sequence". They share the ranking, so the
+    spaces returned here are nested — each is a subset of the next — which is
+    the property a convergence argument needs and a tolerance ladder does not
+    guarantee, because a ladder can jump several orbitals between rungs and
+    leave the sequence too coarse to tell convergence from a big step.
+
+    Sizes that are not chemically valid are skipped rather than returned, on
+    the same grounds `select_active_space` rejects them.
+    """
+    occ = np.asarray(occupations, dtype=float)
+    mass = correlation_mass(occ)
+    order = np.lexsort((np.arange(occ.size), -mass))
+    correlated = [int(i) for i in order if mass[i] > _INTEGER_TOL]
+    if not correlated:
+        return []
+
+    ceiling = min(len(correlated), max_orbitals or len(correlated))
+    spaces: list[ActiveSpace] = []
+    for size in range(min_orbitals, ceiling + 1):
+        candidate = _space_from_indices(occ, tuple(sorted(correlated[:size])))
+        if _validity_error(candidate.n_electrons, candidate.n_orbitals) is None:
+            spaces.append(candidate)
+    return spaces
+
 
 def select_active_space(
     occupations: np.ndarray,

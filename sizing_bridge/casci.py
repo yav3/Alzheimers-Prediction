@@ -1,5 +1,5 @@
 # ── vendored ──
-# Vendored from lotwhitelabelnt backend/app/bridge/casci.py at 55e18a0.
+# Vendored from lotwhitelabelnt backend/app/bridge/casci.py at 0f51295.
 # Do not edit here. Change the source, then re-run:
 #     python3 scripts/agent/sync_bridge.py <this directory>
 # Verify with --check. See app/bridge/__init__.py for the contract.
@@ -56,8 +56,16 @@ __all__ = [
     "solve_casci",
 ]
 
-#: Above this the dense (n_orb, n_orb, n_det) intermediate stops being sane.
-MAX_DETERMINANTS = 100_000
+#: The solver blocks its intermediates, so this is a time budget rather than a
+#: memory one: a space this size takes minutes, not seconds, and belongs in an
+#: offline certification run rather than behind a request.
+MAX_DETERMINANTS = 2_000_000
+
+#: Bytes the blocked sigma may hold in its two intermediates at once. The
+#: determinant axis is split to respect it, which is exact rather than
+#: approximate: G[p,q] at a determinant depends only on D at that same
+#: determinant, so a block carries everything its own contraction needs.
+SIGMA_MEMORY_BUDGET = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -95,8 +103,15 @@ def _strings(n_orbitals: int, n_electrons: int) -> list[tuple[int, ...]]:
 
 def _excitation_table(
     n_orbitals: int, n_electrons: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """All (out, in, p, q, sign) with a†_p a_q |in> = sign · |out>.
+) -> list[tuple[int, int, np.ndarray, np.ndarray, np.ndarray]]:
+    """Excitations grouped by (p, q): a†_p a_q |in> = sign · |out>.
+
+    Grouped rather than flat, and that is a performance decision with a
+    correctness argument behind it. For a *fixed* (p, q) the map from input
+    string to output string is injective — two different strings cannot excite
+    into the same one under the same operator — so each group can be applied
+    with plain fancy indexing instead of a scattered accumulation.
+    `np.add.at` was over half the solver's runtime before this change.
 
     Signs follow the standard convention: annihilating q carries (−1) to the
     number of occupied orbitals below q, then creating p carries (−1) to the
@@ -107,11 +122,7 @@ def _excitation_table(
     """
     strings = _strings(n_orbitals, n_electrons)
     index = {s: i for i, s in enumerate(strings)}
-    out: list[int] = []
-    inn: list[int] = []
-    ps: list[int] = []
-    qs: list[int] = []
-    signs: list[int] = []
+    grouped: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
 
     for j, s in enumerate(strings):
         occupied = set(s)
@@ -123,19 +134,24 @@ def _excitation_table(
                     continue
                 sign_create = -1 if sum(1 for o in rest if o < p) % 2 else 1
                 target = tuple(sorted(rest + (p,)))
-                out.append(index[target])
-                inn.append(j)
-                ps.append(p)
-                qs.append(q)
-                signs.append(sign_annihilate * sign_create)
+                grouped.setdefault((p, q), []).append(
+                    (index[target], j, sign_annihilate * sign_create)
+                )
 
-    return (
-        np.asarray(out, dtype=np.intp),
-        np.asarray(inn, dtype=np.intp),
-        np.asarray(ps, dtype=np.intp),
-        np.asarray(qs, dtype=np.intp),
-        np.asarray(signs, dtype=float),
-    )
+    table = []
+    for (p, q), entries in sorted(grouped.items()):
+        out, inn, signs = zip(*entries, strict=True)
+        assert len(set(out)) == len(out), "excitation within one (p, q) is injective"
+        table.append(
+            (
+                p,
+                q,
+                np.asarray(out, dtype=np.intp),
+                np.asarray(inn, dtype=np.intp),
+                np.asarray(signs, dtype=float),
+            )
+        )
+    return table
 
 
 class DeterminantSpace:
@@ -189,47 +205,75 @@ class DeterminantSpace:
         no, na, nb = self.n_orbitals, self.n_alpha_strings, self.n_beta_strings
         d = np.zeros((no, no, na, nb))
 
-        out, inn, p, q, sign = self._alpha
-        np.add.at(d, (p, q, out), sign[:, None] * c[inn])
-
-        out, inn, p, q, sign = self._beta
-        d_beta = np.zeros((no, no, nb, na))
-        ct = np.ascontiguousarray(c.T)
-        np.add.at(d_beta, (p, q, out), sign[:, None] * ct[inn])
-        d += d_beta.transpose(0, 1, 3, 2)
+        for p, q, out, inn, sign in self._alpha:
+            d[p, q][out] = sign[:, None] * c[inn]
+        for p, q, out, inn, sign in self._beta:
+            d[p, q][:, out] += sign[None, :] * c[:, inn]
         return d
 
     def contract_excitations(self, g: np.ndarray) -> np.ndarray:
         """Σ_pq E_pq g[p, q] — the adjoint half of the sigma build."""
-        no, na, nb = self.n_orbitals, self.n_alpha_strings, self.n_beta_strings
-        result = np.zeros((na, nb))
+        result = np.zeros((self.n_alpha_strings, self.n_beta_strings))
 
-        out, inn, p, q, sign = self._alpha
-        flat = g.reshape(no * no * na, nb)
-        source = (p * no + q) * na + inn
-        np.add.at(result, out, sign[:, None] * flat[source])
-
-        out, inn, p, q, sign = self._beta
-        flat_t = np.ascontiguousarray(g.transpose(0, 1, 3, 2)).reshape(
-            no * no * nb, na
-        )
-        source = (p * no + q) * nb + inn
-        result_t = np.zeros((nb, na))
-        np.add.at(result_t, out, sign[:, None] * flat_t[source])
-        result += result_t.T
+        for p, q, out, inn, sign in self._alpha:
+            result[out] += sign[:, None] * g[p, q][inn]
+        for p, q, out, inn, sign in self._beta:
+            result[:, out] += sign[None, :] * g[p, q][:, inn]
         return result
 
     # ── The Hamiltonian ─────────────────────────────────────────────────────
 
+    def _block_width(self) -> int:
+        """Beta strings per block, from the memory budget."""
+        per_column = 2 * 8 * self.n_orbitals**2 * self.n_alpha_strings
+        return max(1, min(self.n_beta_strings, SIGMA_MEMORY_BUDGET // max(per_column, 1)))
+
     def sigma(
         self, c: np.ndarray, h_effective: np.ndarray, eri: np.ndarray
     ) -> np.ndarray:
-        """H c, without ever forming H."""
-        d = self.apply_excitations(c)
-        s = np.einsum("pq,pqab->ab", h_effective, d, optimize=True)
-        g = np.einsum("pqrs,rsab->pqab", eri, d, optimize=True)
-        s += 0.5 * self.contract_excitations(g)
-        return s
+        """H c, without ever forming H — or the whole of D and G at once.
+
+        The determinant axis is walked in blocks of beta strings. Within a
+        block the one-body term and the integral contraction stay local, while
+        the second application of E_pq scatters out of the block and is
+        accumulated into the full result. Blocking is exact: no term is
+        approximated or dropped, only deferred.
+        """
+        no = self.n_orbitals
+        na, nb = self.n_alpha_strings, self.n_beta_strings
+        eri_matrix = eri.reshape(no * no, no * no)
+        h_flat = h_effective.reshape(-1)
+        out_total = np.zeros((na, nb))
+        width = self._block_width()
+
+        for start in range(0, nb, width):
+            stop = min(start + width, nb)
+            span = stop - start
+            d = np.zeros((no, no, na, span))
+
+            for p, q, out, inn, sign in self._alpha:
+                d[p, q][out] = sign[:, None] * c[inn, start:stop]
+            for p, q, out, inn, sign in self._beta:
+                inside = (out >= start) & (out < stop)
+                if inside.any():
+                    d[p, q][:, out[inside] - start] += (
+                        sign[inside][None, :] * c[:, inn[inside]]
+                    )
+
+            flat = d.reshape(no * no, -1)
+            out_total[:, start:stop] += (h_flat @ flat).reshape(na, span)
+            g = (eri_matrix @ flat).reshape(no, no, na, span)
+
+            for p, q, out, inn, sign in self._alpha:
+                out_total[out, start:stop] += 0.5 * sign[:, None] * g[p, q][inn]
+            for p, q, out, inn, sign in self._beta:
+                inside = (inn >= start) & (inn < stop)
+                if inside.any():
+                    out_total[:, out[inside]] += (
+                        0.5 * sign[inside][None, :] * g[p, q][:, inn[inside] - start]
+                    )
+
+        return out_total
 
     def diagonal(self, h: np.ndarray, eri: np.ndarray) -> np.ndarray:
         """<D|H|D> for every determinant, for the Davidson preconditioner."""

@@ -1,5 +1,5 @@
 # ── vendored ──
-# Vendored from lotwhitelabelnt backend/app/bridge/hamiltonian.py at 55e18a0.
+# Vendored from lotwhitelabelnt backend/app/bridge/hamiltonian.py at 0f51295.
 # Do not edit here. Change the source, then re-run:
 #     python3 scripts/agent/sync_bridge.py <this directory>
 # Verify with --check. See app/bridge/__init__.py for the contract.
@@ -209,9 +209,14 @@ class ElectronicHamiltonian:
         h' = Uᵀ h U and (pq|rs)' = Σ U U U U (..), which is a quartic
         contraction done here once rather than open-coded at each call site.
 
-        Orbital symmetries are dropped: a rotation mixes irreps unless it is
-        block-diagonal, and claiming a symmetry label that no longer holds is
-        worse than carrying none.
+        Orbital symmetries are carried through when the rotation provably
+        preserves them and dropped when it does not. A rotation that mixes two
+        irreps destroys the labels, and claiming one that no longer holds is
+        worse than carrying none — but the rotation that matters here, into
+        natural orbitals, is usually block-diagonal by irrep, because the
+        density matrix commutes with the symmetry operations. Discarding the
+        labels unconditionally would throw away information the receiving code
+        can use, so the block structure is checked rather than assumed.
         """
         u = np.asarray(coefficients, dtype=float)
         n = self.n_orbitals
@@ -228,7 +233,7 @@ class ElectronicHamiltonian:
             n_electrons=self.n_electrons,
             core_energy=self.core_energy,
             ms2=self.ms2,
-            orbital_symmetries=(),
+            orbital_symmetries=_rotated_symmetries(u, self.orbital_symmetries),
             provenance={**self.provenance, "basis_rotated": True},
         )
 
@@ -274,6 +279,29 @@ class ElectronicHamiltonian:
 
 
 # ── Natural occupations ──────────────────────────────────────────────────────
+
+def _rotated_symmetries(
+    u: np.ndarray, symmetries: tuple[int, ...], tol: float = 1e-8
+) -> tuple[int, ...]:
+    """Symmetry labels after a rotation, or none if the rotation mixed irreps.
+
+    A new orbital keeps a label only if every old orbital contributing to it
+    carried that same label. One mixed column invalidates the whole set, not
+    just its own entry: ORBSYM is read as a block structure by the codes that
+    consume it, and a partially-correct block structure is not a weaker claim
+    than none, it is a wrong one.
+    """
+    if not symmetries or len(symmetries) != u.shape[0]:
+        return ()
+    labels = np.asarray(symmetries)
+    rotated: list[int] = []
+    for column in range(u.shape[1]):
+        contributing = np.unique(labels[np.abs(u[:, column]) > tol])
+        if contributing.size != 1:
+            return ()
+        rotated.append(int(contributing[0]))
+    return tuple(rotated)
+
 
 def natural_occupations(one_rdm: np.ndarray) -> np.ndarray:
     """Natural orbital occupation numbers: eigenvalues of the spatial 1-RDM.
