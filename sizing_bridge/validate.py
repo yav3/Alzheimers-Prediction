@@ -1,5 +1,5 @@
 # ── vendored ──
-# Vendored from lotwhitelabelnt backend/app/bridge/validate.py at 0f51295.
+# Vendored from lotwhitelabelnt backend/app/bridge/validate.py at c002365.
 # Do not edit here. Change the source, then re-run:
 #     python3 scripts/agent/sync_bridge.py <this directory>
 # Verify with --check. See app/bridge/__init__.py for the contract.
@@ -78,6 +78,9 @@ from .resources import CHEMICAL_ACCURACY_HARTREE
 
 __all__ = [
     "Candidate",
+    "certify_across_rankings",
+    "ExternalSpaceVerdict",
+    "score_supplied_space",
     "ReductionCertificate",
     "certify_by_convergence",
     "certify_reduction",
@@ -450,7 +453,7 @@ def _certify_reduction(
         full_determinants=full_determinants,
         candidates=candidates,
         reason=(
-            f"no space on the tolerance ladder reproduced the reference to "
+            f"no space smaller than the full one reproduced the reference to "
             f"{threshold:.3g} Hartree; the closest was "
             f"{best.space.label if best and best.space else 'none'} at "
             f"{best.error_kcal:+.3f} kcal/mol"
@@ -723,3 +726,219 @@ def certify_by_convergence(
             "max_determinants": max_determinants,
         },
     )
+
+
+@dataclass
+class ExternalSpaceVerdict:
+    """What a space chosen elsewhere cost, on the same terms as one of ours."""
+
+    verdict: str
+    energy: float
+    reference_energy: float
+    reference_source: str
+    error_hartree: float
+    threshold_hartree: float
+    qubits: int
+    n_determinants: int
+    reference_step_hartree: float | None = None
+    manifest: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def preserved(self) -> bool:
+        return self.verdict == "preserved"
+
+    @property
+    def error_kcal(self) -> float:
+        return self.error_hartree * HARTREE_TO_KCAL
+
+    @property
+    def bound_kcal(self) -> float:
+        step = self.reference_step_hartree or 0.0
+        return (abs(self.error_hartree) + step) * HARTREE_TO_KCAL
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "verdict": self.verdict,
+            "preserved": self.preserved,
+            "energy": self.energy,
+            "reference_energy": self.reference_energy,
+            "reference_source": self.reference_source,
+            "error_hartree": self.error_hartree,
+            "error_kcal_per_mol": self.error_kcal,
+            "bound_kcal_per_mol": self.bound_kcal,
+            "threshold_hartree": self.threshold_hartree,
+            "qubits": self.qubits,
+            "n_determinants": self.n_determinants,
+            "reference_step_hartree": self.reference_step_hartree,
+            "manifest": dict(self.manifest),
+        }
+
+    def summary(self) -> str:
+        return (
+            f"a supplied {self.qubits}-qubit space lands "
+            f"{self.error_kcal:+.3f} kcal/mol from {self.reference_source} "
+            f"(bound {self.bound_kcal:.3f} kcal/mol): {self.verdict}"
+        )
+
+
+def score_supplied_space(
+    projected: ElectronicHamiltonian,
+    *,
+    reference_energy: float,
+    reference_source: str = "supplied reference",
+    threshold: float = CHEMICAL_ACCURACY_HARTREE,
+    reference_step: float | None = None,
+) -> ExternalSpaceVerdict:
+    """Score an active space this package did not choose.
+
+    ``projected`` is an already-projected active-space Hamiltonian — what a
+    package writes out when it has selected a space by its own criteria and
+    folded the frozen core itself. AVAS, DMET and a chemist working by hand all
+    produce one, and each does it in its own orbital basis, so there is nothing
+    to re-project here and nothing of ours to impose.
+
+    The comparison is still sound across bases, and that is the point. A CASCI
+    wavefunction in any active space is a valid N-electron wavefunction in the
+    full one-particle basis, so its energy is an upper bound on the same
+    full-basis exact answer. Two spaces chosen by different methods, in
+    different orbitals, are therefore directly comparable as long as the
+    underlying basis set is the same — lower is better, with no reference
+    needed to establish the ordering and no way for the choice of reference to
+    favour one selector.
+
+    ``reference_step`` carries the residual movement of a reference produced by
+    `certify_by_convergence`, so a supplied space is judged on the same bound
+    as one of ours rather than on a more forgiving one.
+
+    We would rather be the thing that scores a space than one more thing that
+    chooses one. Where our own selection is weakest — a nearly-filled d shell,
+    where ranking by occupancy is blind — this is the entry point that still
+    gives an honest answer.
+    """
+    result = solve_casci(projected)
+    error = result.energy - reference_energy
+    step = reference_step or 0.0
+
+    if not result.converged:
+        verdict = "unconverged"
+    elif abs(error) + step <= threshold:
+        verdict = "preserved"
+    else:
+        verdict = "degraded"
+
+    scored = ExternalSpaceVerdict(
+        verdict=verdict,
+        energy=result.energy,
+        reference_energy=reference_energy,
+        reference_source=reference_source,
+        error_hartree=error,
+        threshold_hartree=threshold,
+        qubits=projected.n_qubits,
+        n_determinants=result.n_determinants,
+        reference_step_hartree=reference_step,
+    )
+    scored.manifest = build_manifest(
+        analysis="supplied_space_scoring",
+        parameters={
+            "threshold": threshold,
+            "reference_energy": reference_energy,
+            "reference_source": reference_source,
+            "reference_step": reference_step,
+        },
+        seed=None,
+        input_fingerprint=fingerprint(
+            {
+                "one_body": np.asarray(projected.one_body).round(12).tolist(),
+                "two_body_norm": float(np.linalg.norm(projected.two_body)),
+                "n_electrons": projected.n_electrons,
+                "ms2": projected.ms2,
+                "core_energy": round(float(projected.core_energy), 12),
+            }
+        ),
+        stages=[{"candidate": "supplied", "qubits": scored.qubits, "status": verdict}],
+        output_payload=scored.as_dict(),
+    )
+    return scored
+
+
+def certify_across_rankings(
+    hamiltonian: ElectronicHamiltonian,
+    rankings: dict[str, np.ndarray],
+    *,
+    reference_energy: float | None = None,
+    threshold: float = CHEMICAL_ACCURACY_HARTREE,
+    max_orbitals: int | None = None,
+    max_determinants: int = MAX_DETERMINANTS,
+) -> ReductionCertificate:
+    """Try several orbital rankings and keep the best space any of them found.
+
+    No cheap ranking is reliable everywhere. Occupations from perturbation
+    theory are blind to a nearly-filled d shell and collapse entirely when the
+    perturbation series does; seniority-zero occupations see static
+    correlation but not dynamic, and give up a little on weakly correlated
+    molecules. Measured on the benchmark set, swapping one for the other moves
+    copper hydride by 88 kcal/mol in our favour and nitrogen by 5 against.
+
+    Choosing between them in advance is the problem this package exists not to
+    have. Each ranking produces a ladder, every candidate is solved and scored
+    against the same reference, and the smallest space that holds wins on the
+    measurement rather than on the reputation of the method that proposed it.
+    The certificate names which ranking produced it, and the candidates from
+    all of them are kept, so a reader can see that the other ranking was tried
+    and what it offered.
+
+    ``rankings`` maps a name to a one-particle density matrix. For a ranking
+    that is already diagonal in the working basis — seniority-zero occupations
+    are — pass ``np.diag(occupations)``; the rotation then reduces to the
+    sort, and the orbital indices carry through unchanged.
+    """
+    if not rankings:
+        raise ValueError("at least one ranking is required")
+
+    best: ReductionCertificate | None = None
+    everything: list[Candidate] = []
+
+    for name, one_rdm in rankings.items():
+        certificate = certify_reduction(
+            hamiltonian,
+            one_rdm,
+            reference_energy=reference_energy,
+            threshold=threshold,
+            max_orbitals=max_orbitals,
+            max_determinants=max_determinants,
+        )
+        for candidate in certificate.candidates:
+            everything.append(
+                Candidate(
+                    candidate.correlation_retained,
+                    candidate.space,
+                    candidate.energy,
+                    candidate.error_hartree,
+                    candidate.n_determinants,
+                    candidate.qubits,
+                    candidate.status,
+                    f"ranking={name}"
+                    + (f"; {candidate.detail}" if candidate.detail else ""),
+                )
+            )
+        if not certificate.certified or certificate.space is None:
+            if best is None:
+                best = certificate
+            continue
+        if (
+            best is None
+            or not best.certified
+            or best.space is None
+            or certificate.space.qubits < best.space.qubits
+            or (
+                certificate.space.qubits == best.space.qubits
+                and abs(certificate.error_hartree or 0.0)
+                < abs(best.error_hartree or 0.0)
+            )
+        ):
+            best = certificate
+            best.reference_source = f"{certificate.reference_source} (ranking={name})"
+
+    assert best is not None
+    best.candidates = sorted(everything, key=lambda c: (c.qubits or 0, c.detail))
+    return best

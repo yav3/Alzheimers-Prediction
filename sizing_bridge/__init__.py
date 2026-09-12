@@ -1,5 +1,5 @@
 # ── vendored ──
-# Vendored from lotwhitelabelnt backend/app/bridge/__init__.py at 0f51295.
+# Vendored from lotwhitelabelnt backend/app/bridge/__init__.py at c002365.
 # Do not edit here. Change the source, then re-run:
 #     python3 scripts/agent/sync_bridge.py <this directory>
 # Verify with --check. See app/bridge/__init__.py for the contract.
@@ -63,6 +63,7 @@ from .allocation import (
 from .audit import audit_matrix
 from .campaign import Campaign, CampaignStore, GroupBelief, ProblemKey
 from .casci import CASCIResult, DeterminantSpace, solve_casci
+from .doci import DOCIResult, doci_occupations, solve_doci
 from .hamiltonian import (
     ElectronicHamiltonian,
     natural_occupations,
@@ -92,8 +93,12 @@ from .spec import (
 )
 from .validate import (
     Candidate,
+    ExternalSpaceVerdict,
     ReductionCertificate,
+    certify_across_rankings,
+    certify_by_convergence,
     certify_reduction,
+    score_supplied_space,
     validate_space,
 )
 
@@ -104,7 +109,14 @@ __all__ = [
     "Candidate",
     "DeterminantSpace",
     "ReductionCertificate",
+    "ExternalSpaceVerdict",
+    "DOCIResult",
+    "certify_across_rankings",
+    "certify_by_convergence",
+    "doci_occupations",
+    "solve_doci",
     "certify_reduction",
+    "score_supplied_space",
     "solve_casci",
     "validate_space",
     "AuditReport",
