@@ -1,5 +1,5 @@
 # ── vendored ──
-# Vendored from lotwhitelabelnt backend/app/bridge/doci.py at c002365.
+# Vendored from lotwhitelabelnt backend/app/bridge/doci.py at bba1add.
 # Do not edit here. Change the source, then re-run:
 #     python3 scripts/agent/sync_bridge.py <this directory>
 # Verify with --check. See app/bridge/__init__.py for the contract.
@@ -75,6 +75,12 @@ class DOCIResult:
     n_electrons: int
     converged: bool
     iterations: int
+    #: The seniority-zero coefficients, in the order `combinations(range(n_o),
+    #: n_pairs)` enumerates the configurations — which is the same order
+    #: `casci._strings` uses, so the vector embeds into the full determinant
+    #: space without a lookup. Kept off `as_dict`: it is working state, not a
+    #: result anyone reads.
+    coefficients: np.ndarray | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -185,6 +191,7 @@ def solve_doci(
         energy = float(diagonal[0])
         weights = configurations[0]
         return DOCIResult(
+            coefficients=np.ones(1),
             occupations=2.0 * weights,
             energy=energy + float(hamiltonian.core_energy),
             n_determinants=1,
@@ -213,6 +220,7 @@ def solve_doci(
     weights = ground**2
     occupations = 2.0 * (weights @ configurations)
     return DOCIResult(
+        coefficients=ground,
         occupations=np.clip(occupations, 0.0, 2.0),
         energy=energy + float(hamiltonian.core_energy),
         n_determinants=dimension,

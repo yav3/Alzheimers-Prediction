@@ -1,5 +1,5 @@
 # ── vendored ──
-# Vendored from lotwhitelabelnt backend/app/bridge/casci.py at c002365.
+# Vendored from lotwhitelabelnt backend/app/bridge/casci.py at bba1add.
 # Do not edit here. Change the source, then re-run:
 #     python3 scripts/agent/sync_bridge.py <this directory>
 # Verify with --check. See app/bridge/__init__.py for the contract.
@@ -38,6 +38,33 @@ smoothed over: an energy that did not converge is not an energy.
 
 Spin: Ms = 0 or a fixed Ms via the electron split; this is a spin-restricted,
 real-orbital code, matching the FCIDUMP convention used in `hamiltonian.py`.
+
+**Two optimisations that were measured and rejected**, recorded so nobody
+spends the afternoon twice.
+
+*A low-rank factorisation of the integrals.* The dominant cost is the
+O(n_orb⁴ · n_det) contraction, and density fitting would reduce it if the
+integral supermatrix had numerical rank well below n_orb(n_orb+1)/2. It does
+not, for any system in the fixture set: water in 6-31G comes back at rank 65
+of a possible 66, the [2Fe-2S] cluster at 209 of 210. The measured speedup
+available is 0.93x to 1.01x — that is, none.
+
+*Seeding Davidson with the seniority-zero vector.* The default guess is one
+determinant, which describes a strongly correlated state badly, so a DOCI
+start looked free and promising. It is not: iteration counts barely move
+(129 to 125 on the stretched H10 chain) because the subspace absorbs the
+dominant directions within two or three iterations regardless, and paying for
+the pair problem first made N2 21% slower overall.
+
+What did help was raising the Davidson restart threshold, which is why
+``max_subspace`` defaults to 48 rather than 24: on the hardest case in the set
+that is 97 iterations instead of 129, about 1.2x. Past roughly 60 the cost of
+the larger subspace eats the gain.
+
+The honest position on scale: this is BLAS-bound, the remaining levers are
+point-group symmetry (no help on a C1 molecule) and selected CI (which would
+trade away the exactness the certificate rests on), and a materially higher
+ceiling is a compiled-code project rather than a tuning exercise.
 """
 
 from __future__ import annotations
@@ -81,6 +108,10 @@ class CASCIResult:
     converged: bool
     iterations: int
     residual: float
+    #: The CI vector, shaped (alpha strings, beta strings). Kept off
+    #: `as_dict` — it is the wavefunction, not a number anyone reads in a
+    #: report, and for a large space it is the bulk of the object.
+    coefficients: np.ndarray | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -303,6 +334,7 @@ def _davidson(
     tolerance: float,
     max_iterations: int,
     max_subspace: int,
+    guess: np.ndarray | None = None,
 ) -> tuple[float, np.ndarray, bool, int, float]:
     shape = diagonal.shape
     dim = diagonal.size
@@ -317,8 +349,17 @@ def _davidson(
         values, vectors = np.linalg.eigh(matrix)
         return float(values[0]), vectors[:, 0].reshape(shape), True, 1, 0.0
 
-    guess = np.zeros(dim)
-    guess[int(np.argmin(flat_diagonal))] = 1.0
+    if guess is None:
+        guess = np.zeros(dim)
+        guess[int(np.argmin(flat_diagonal))] = 1.0
+    else:
+        guess = np.asarray(guess, dtype=float).ravel().copy()
+        norm = float(np.linalg.norm(guess))
+        if norm < 1e-12:
+            guess = np.zeros(dim)
+            guess[int(np.argmin(flat_diagonal))] = 1.0
+        else:
+            guess /= norm
     basis = [guess]
     products = [apply(guess)]
     energy = float(guess @ products[0])
@@ -342,8 +383,7 @@ def _davidson(
         denominator[np.abs(denominator) < 1e-8] = 1e-8
         correction = residual / denominator
 
-        for vector in basis:
-            correction -= (vector @ correction) * vector
+        correction -= v @ (v.T @ correction)
         norm = float(np.linalg.norm(correction))
         if norm < 1e-12:
             # The subspace already spans the correction; more iterations here
@@ -381,7 +421,7 @@ def solve_casci(
     *,
     tolerance: float = 1e-10,
     max_iterations: int = 200,
-    max_subspace: int = 24,
+    max_subspace: int = 48,
 ) -> CASCIResult:
     """Ground-state energy of ``hamiltonian`` by exact diagonalisation.
 
@@ -411,7 +451,7 @@ def solve_casci(
     h_effective = _effective_one_body(h, eri)
     diagonal = space.diagonal(h, eri)
 
-    energy, _, converged, iterations, residual = _davidson(
+    energy, vector, converged, iterations, residual = _davidson(
         space,
         h_effective,
         eri,
@@ -423,6 +463,7 @@ def solve_casci(
 
     core = float(hamiltonian.core_energy)
     return CASCIResult(
+        coefficients=vector,
         energy=energy + core,
         electronic_energy=energy,
         core_energy=core,

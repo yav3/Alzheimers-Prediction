@@ -1,5 +1,5 @@
 # ── vendored ──
-# Vendored from lotwhitelabelnt backend/app/bridge/__init__.py at c002365.
+# Vendored from lotwhitelabelnt backend/app/bridge/__init__.py at bba1add.
 # Do not edit here. Change the source, then re-run:
 #     python3 scripts/agent/sync_bridge.py <this directory>
 # Verify with --check. See app/bridge/__init__.py for the contract.
@@ -91,6 +91,12 @@ from .spec import (
     ReductionReport,
     SizingReport,
 )
+from .trial import (
+    TrialCertificate,
+    TrialQuality,
+    certify_trial_state,
+    trial_overlap,
+)
 from .validate import (
     Candidate,
     ExternalSpaceVerdict,
@@ -111,6 +117,10 @@ __all__ = [
     "ReductionCertificate",
     "ExternalSpaceVerdict",
     "DOCIResult",
+    "TrialCertificate",
+    "TrialQuality",
+    "certify_trial_state",
+    "trial_overlap",
     "certify_across_rankings",
     "certify_by_convergence",
     "doci_occupations",
